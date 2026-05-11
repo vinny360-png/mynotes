@@ -9,11 +9,11 @@ htf = input.timeframe("5", title="Higher Timeframe (HTF)", group="Timeframes")
 ltf = input.timeframe("1", title="Entry Timeframe (LTF)",  group="Timeframes")
 
 // Indicators
-// EMA13 is computed here first so it can serve as the default for fastTrend.
-// Leaving fastTrend at the built-in "close" default would make close > close
-// always false, silently blocking every trade signal.
-ema13     = ta.ema(close, 13)
-fastTrend = input.source(ema13, title="FastTrend Source", group="Indicators")
+// input.source only accepts built-in price series (open/high/low/close/…) as defval.
+// Use a separate bool toggle to enable the extra FastTrend filter; when OFF the
+// breakout fires on the EMA13 cross alone, which is the normal default behaviour.
+useFastTrend = input.bool(false, title="Use FastTrend Filter?", group="Indicators", tooltip="Turn ON and wire an external indicator to require a second confirmation cross.")
+fastTrend    = input.source(close, title="FastTrend Source (requires toggle ON)", group="Indicators")
 
 // Trading Sessions
 useAsia   = input.bool(false, title="Trade Asian Session", group="Trading Sessions")
@@ -92,7 +92,7 @@ if isNewHTF
 // =========================================================================
 // 4. LOWER TIMEFRAME (LTF) NATIVE LOGIC
 // =========================================================================
-// ema13 is already computed above (before the fastTrend input)
+ema13  = ta.ema(close, 13)
 sma50  = ta.sma(close, 50)
 ema200 = ta.ema(close, 200)
 
@@ -101,8 +101,10 @@ ltf_bullAligned = strictAlign ? ((ema13 > sma50) and (sma50 > ema200)) : true
 ltf_bearAligned = strictAlign ? ((ema13 < sma50) and (sma50 < ema200)) : true
 
 // THE "PURE BODY CUT" BREAKOUT LOGIC
-bullBreakout = (open <= ema13) and (open <= fastTrend) and (close > ema13) and (close > fastTrend)
-bearBreakout = (open >= ema13) and (open >= fastTrend) and (close < ema13) and (close < fastTrend)
+// When useFastTrend is OFF the EMA13 cross is the only requirement (default).
+// When useFastTrend is ON the candle body must also cross the wired FastTrend source.
+bullBreakout = (open <= ema13) and (close > ema13) and (not useFastTrend or ((open <= fastTrend) and (close > fastTrend)))
+bearBreakout = (open >= ema13) and (close < ema13) and (not useFastTrend or ((open >= fastTrend) and (close < fastTrend)))
 
 // =========================================================================
 // 5. THE FINAL TRIGGER
