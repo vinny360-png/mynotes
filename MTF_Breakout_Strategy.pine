@@ -9,7 +9,11 @@ htf = input.timeframe("5", title="Higher Timeframe (HTF)", group="Timeframes")
 ltf = input.timeframe("1", title="Entry Timeframe (LTF)",  group="Timeframes")
 
 // Indicators
-fastTrend = input.source(close, title="FastTrend Source", group="Indicators")
+// EMA13 is computed here first so it can serve as the default for fastTrend.
+// Leaving fastTrend at the built-in "close" default would make close > close
+// always false, silently blocking every trade signal.
+ema13     = ta.ema(close, 13)
+fastTrend = input.source(ema13, title="FastTrend Source", group="Indicators")
 
 // Trading Sessions
 useAsia   = input.bool(false, title="Trade Asian Session", group="Trading Sessions")
@@ -88,7 +92,7 @@ if isNewHTF
 // =========================================================================
 // 4. LOWER TIMEFRAME (LTF) NATIVE LOGIC
 // =========================================================================
-ema13  = ta.ema(close, 13)
+// ema13 is already computed above (before the fastTrend input)
 sma50  = ta.sma(close, 50)
 ema200 = ta.ema(close, 200)
 
