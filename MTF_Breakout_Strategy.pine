@@ -1,0 +1,152 @@
+//@version=5
+strategy("MTF Breakout - Strict RR & Position Lock", overlay=true, initial_capital=10000, default_qty_type=strategy.cash, commission_type=strategy.commission.cash_per_contract, commission_value=0.50, process_orders_on_close=true)
+
+// =========================================================================
+// 1. INPUTS
+// =========================================================================
+// Timeframes
+htf = input.timeframe("5", title="Higher Timeframe (HTF)", group="Timeframes")
+ltf = input.timeframe("1", title="Entry Timeframe (LTF)",  group="Timeframes")
+
+// Indicators
+fastTrend = input.source(close, title="FastTrend Source", group="Indicators")
+
+// Trading Sessions
+useAsia   = input.bool(false, title="Trade Asian Session", group="Trading Sessions")
+asiaTime  = input.session("1800-0300", title="Asian Time (NY)", group="Trading Sessions")
+
+useLondon = input.bool(true,  title="Trade London Session", group="Trading Sessions")
+londonTime= input.session("0300-1200", title="London Time (NY)", group="Trading Sessions")
+
+useNY     = input.bool(true,  title="Trade New York Session", group="Trading Sessions")
+nyTime    = input.session("0800-1700", title="New York Time (NY)", group="Trading Sessions")
+
+tz        = input.string("America/New_York", title="Session Timezone", group="Trading Sessions")
+
+// Strategy Filters
+strictAlign = input.bool(false, title="Require Strict LTF MA Alignment?", group="Execution Settings", tooltip="Turn OFF to catch sharp reversals. Turn ON to avoid chop.")
+
+// Dynamic Risk Management
+riskPerTrade = input.float(100.0, title="Amount to Risk ($) per Trade", minval=1.0, group="Risk Management")
+contractMult = input.float(10.0,  title="Contract Multiplier (e.g., 10 for GC/MNQ)", group="Risk Management")
+rrRatio      = input.float(2.0,   title="Risk:Reward Ratio (e.g., 2.0 = 1:2)", step=0.5, group="Risk Management")
+
+// =========================================================================
+// 2. TIMEFRAME & SESSION STATE
+// =========================================================================
+isOnHTF = timeframe.period == htf
+isOnLTF = timeframe.period == ltf
+
+bgcolor((not isOnHTF and not isOnLTF) ? color.new(color.red, 90) : na, title="Wrong Timeframe Warning")
+
+// Session Math
+inAsia   = useAsia   and not na(time(timeframe.period, asiaTime, tz))
+inLondon = useLondon and not na(time(timeframe.period, londonTime, tz))
+inNY     = useNY     and not na(time(timeframe.period, nyTime, tz))
+
+// If all toggles are OFF, default to 24/7 trading.
+anySessionChecked = useAsia or useLondon or useNY
+inActiveSession   = anySessionChecked ? (inAsia or inLondon or inNY) : true
+
+// =========================================================================
+// 3. HIGHER TIMEFRAME (HTF) LOGIC 
+// =========================================================================
+f_htf_logic() =>
+    e13  = ta.ema(close, 13)
+    s50  = ta.sma(close, 50)
+    e200 = ta.ema(close, 200)
+
+    bullAligned = (e13 > s50) and (s50 > e200)
+    bearAligned = (e13 < s50) and (s50 < e200)
+
+    bodyBottom = math.min(open, close)
+    bodyTop    = math.max(open, close)
+
+    bullRejection = (low <= e13) and (bodyBottom > e13) and bullAligned
+    bearRejection = (high >= e13) and (bodyTop < e13) and bearAligned
+
+    [bullRejection, bearRejection]
+
+[nativeBullRej, nativeBearRej] = f_htf_logic()
+plotshape(series=(isOnHTF and nativeBullRej), title="HTF Bull Rej", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 20), size=size.normal)
+plotshape(series=(isOnHTF and nativeBearRej), title="HTF Bear Rej", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 20),   size=size.normal)
+
+// Pull raw HTF data without lookahead to prevent future-leaking
+[rawHtfBull, rawHtfBear] = request.security(syminfo.tickerid, htf, f_htf_logic())
+
+// Detect the exact moment a new HTF candle begins
+isNewHTF = ta.change(time(htf)) != 0
+
+// State variables to lock the window open for exactly ONE HTF candle after the rejection
+var bool bullHuntingWindow = false
+var bool bearHuntingWindow = false
+
+if isNewHTF
+    bullHuntingWindow := rawHtfBull
+    bearHuntingWindow := rawHtfBear
+
+// =========================================================================
+// 4. LOWER TIMEFRAME (LTF) NATIVE LOGIC
+// =========================================================================
+ema13  = ta.ema(close, 13)
+sma50  = ta.sma(close, 50)
+ema200 = ta.ema(close, 200)
+
+// Strict LTF Alignment Rules
+ltf_bullAligned = strictAlign ? ((ema13 > sma50) and (sma50 > ema200)) : true
+ltf_bearAligned = strictAlign ? ((ema13 < sma50) and (sma50 < ema200)) : true
+
+// THE "PURE BODY CUT" BREAKOUT LOGIC
+bullBreakout = (open <= ema13) and (open <= fastTrend) and (close > ema13) and (close > fastTrend)
+bearBreakout = (open >= ema13) and (open >= fastTrend) and (close < ema13) and (close < fastTrend)
+
+// =========================================================================
+// 5. THE FINAL TRIGGER
+// =========================================================================
+longTrigger  = isOnLTF and bullHuntingWindow and bullBreakout and ltf_bullAligned and inActiveSession
+shortTrigger = isOnLTF and bearHuntingWindow and bearBreakout and ltf_bearAligned and inActiveSession
+
+// =========================================================================
+// 6. EXECUTION (Exact Risk Math + Position Lock)
+// =========================================================================
+// The 'strategy.position_size == 0' ensures we ignore new signals while in a trade
+if longTrigger and strategy.position_size == 0
+    slPrice = low 
+    riskDistance = close - slPrice
+    
+    riskPerContract = riskDistance * contractMult
+    if riskPerContract <= 0
+        riskPerContract := syminfo.mintick * contractMult
+
+    qty = math.floor(riskPerTrade / riskPerContract)
+    
+    if qty > 0
+        tpPrice = close + (riskDistance * rrRatio)
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Exit Long", "Long", stop=slPrice, limit=tpPrice)
+
+if shortTrigger and strategy.position_size == 0
+    slPrice = high 
+    riskDistance = slPrice - close 
+    
+    riskPerContract = riskDistance * contractMult
+    if riskPerContract <= 0
+        riskPerContract := syminfo.mintick * contractMult
+
+    qty = math.floor(riskPerTrade / riskPerContract)
+    
+    if qty > 0
+        tpPrice = close - (riskDistance * rrRatio)
+        strategy.entry("Short", strategy.short, qty=qty)
+        strategy.exit("Exit Short", "Short", stop=slPrice, limit=tpPrice)
+
+// =========================================================================
+// 7. DYNAMIC CHART VISUALS & HUNTING WINDOWS
+// =========================================================================
+plot(ema13,  color=color.blue,   title="13 EMA",  linewidth=1)
+plot(sma50,  color=color.orange, title="50 SMA",  linewidth=2)
+plot(ema200, color=color.white,  title="200 EMA", linewidth=2)
+
+// Paint the background ONLY during the active setup window
+bgcolor((isOnLTF and bullHuntingWindow) ? color.new(color.green, 92) : na, title="Bullish Hunting Window")
+bgcolor((isOnLTF and bearHuntingWindow) ? color.new(color.red, 92) : na, title="Bearish Hunting Window")
